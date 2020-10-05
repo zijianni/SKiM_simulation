@@ -1,0 +1,321 @@
+---
+title: "SKiM simulation"
+author: "Zijian Ni"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Simulation settings
+
+### Marginal settings
+
+* $N=29613663$ is total number of PMC papers.
+* $A$ is disease. $n_A$ is the number of occurrence of $A$ in all papers. In the following examples we let $n_A=6507$.
+* $B_1, ..., B_{9272}$ are symptoms. $C_1, ..., C_{9665}$ are drugs. $n_{B_i}$'s and $n_{C_j}$'s are their number of occurrence and are stored in separate lists.
+* We filter out $B$'s and $C$'s with zero occuurence. There are 6 $B$'s and 65 $C$'s with zero occurrence. After filtering, there are 9266 $B$'s and 9600 $C$'s left.
+
+### Some Notations
+
+* Between A and B's: $p_1$=P(B occurs | A occurs), $p_2$=P(B occurs | A not occurs)
+* Between B's and C's: $p_1$=P(C occurs | B occurs), $p_2$=P(C occurs | B not occurs)
+* Odds ratio: $OR=\frac{p_1/(1-p_1)}{p_2/(1-p_2)}$
+
+### Define **associations** (pre-assign true significancy)
+
+* $A$ is associated with randomly selected 20 of $B_i$'s. A is not associated with the rest $B$'s.
+* Each $B_i$ is associated with randomly selected 10 of $C_j$'s. i.e. Among all $9272\times9665$ edges between $B$'s and $C$'s, there are $9272\times10$ significant edges.
+* Associated: $OR>=2$ (for simplicity, consider one-sided case)
+* Not associated: $OR=1$
+* $A$ is associated with $C_j$ if $A$ and $C_j$ are associated with at least one common $B_i$. i.e. we have at most (due to overlapping) $20\times10=200$ $C$'s associated with A among all 9665 $C$'s.
+
+### Model assumptions for simulating contingency table
+
+For simplicity, take $A\rightarrow B_1$ as example. All the rest $A\rightarrow B_i$ and $B_i\rightarrow C_j$ follow the same model with different parameters.
+
+Recall that $p_1$=P(B occurs | A occurs), $p_2$=P(B occurs | A not occurs). We simulate the number of co-occurrence of $A$ and $B$, $n_{kt}$, from $Binom(p_1,n_A)$. We simulate the number of papers where $B$ occurs but $A$ does not occur, $n_{BnotA}$, from $Binom(p_2,N-n_A)$. 
+
+Note that $n_{kt}+n_{BnotA}$ does not necessarily equal to $n_B$, but will be pretty close because the values of $p_1$ and $p_2$ are calculated based on $n_B$ (details in below).
+
+### Parameter values setting
+
+* Whether associated or not, $p_2$ is estimated using the marginal probability. i.e. Between $A$ and $B_i$'s: $p_2$=P($B_i$ occurs)=$n_{B_i}/N$. Between $B_i$ and $C_j$: $p_2$=P($C_j$ occurs)=$n_{C_j}/N$.
+
+* For non-associated pairs: $OR=1$, $p_1=p_2$.
+* For associated pairs: $OR~2+Exp(1)$. $p_1$ is calculated using $p_2$ and $OR$.
+* For associated pairs, in the simulated contingency table, a pseudo-count of min(5, sum of first row, sum of first column) is added to the two slots of co-occurrence and co-unoccurrence and subtracted from the rest two slots . The reason is: for tables with zero co-occurrence, FET tends to overestimate p-value (close to 1) and is underpowered to distinguish them even if they have large OR. For example, if $p_1=1e-4$ and $p_2=1e-5$, there is a strong association with OR=~10. However, there can easily be tables with zero co-occurrence when $n_A$ is not large enough. In our case, $n_A=6507$. Expected co-occurrence is $n_A\times p_1=0.65<1$.
+
+* A pseudo-count could hugely increase $p_1$. For example, if $n_A=1$, then $p_1$ will be 1. This is OK since we only apply to associated pairs. We are just making them more associated so that FET could test them out.
+
+### Our goals
+
+* Simulate contingency tables with known association and perform FET to get p-values.
+* Evaluate the power and FDR under p-value cutoff 1e-5 for
+    1. all $A\rightarrow B_i$ associations
+    2. all $B_i\rightarrow C_j$ association for top $N=50$ significant $B_i$'s with highest prediction score
+    3. all $A\rightarrow C_j$ associations as defined previously.
+
+## Implementation in R
+
+### Load data and marginal settings
+
+```{r}
+set.seed(2020)  # for reproducibility
+setwd("~/Google Drive/Hallu/codes/ckgroup/SKIM/") 
+source("simulation_functions.R")
+
+N <- 29613663 # total number of papers in database
+n_A <- 6507 # number of papers containing A
+meta_B <- readxl::read_xlsx("SKiM_Files/To_Zijian/Phenotypes_and_symptoms_count.xlsx", 
+                            sheet = 1)
+meta_C <- readxl::read_xlsx("SKiM_Files/To_Zijian/Drugs_count.xlsx",sheet = 1)
+n_B <- meta_B$Phenotype_and_symptom_count # number of papers containing each B
+n_C <- meta_C$Drug_count # number of papers containing each C
+
+# Filter out zero occurrence
+meta_B <- meta_B[n_B>0,]
+n_B <- n_B[n_B>0]
+meta_C <- meta_C[n_C>0,]
+n_C <- n_C[n_C>0]
+
+p_B <- n_B/N
+p_C <- n_C/N
+```
+
+Check the metadata, counts and probability of $B$'s:
+
+```{r}
+head(meta_B)
+head(n_B)
+head(p_B)
+```
+
+### Define **associations**
+
+```{r}
+#######################################
+# Set significant B's
+n_signif_B <- 20 # number of significant B's
+
+# indices of significant B's to A
+which_signif_BtoA <- sample.int(nrow(meta_B), n_signif_B) 
+
+
+#######################################
+# Set significant C's for each B
+n_signif_C <- 10 # number of significant C's for each B
+# indices of significant C's to each B, as columns
+which_signif_CtoB <- replicate(nrow(meta_B),sample.int(nrow(meta_C), n_signif_C))
+
+
+#######################################
+# Set significant C's to A
+which_signif_CtoA <- unique(as.vector(which_signif_CtoB[,which_signif_BtoA]))
+```
+
+Overview of assigned associated terms:
+
+```{r}
+str(which_signif_BtoA)
+str(which_signif_CtoB)
+str(which_signif_CtoA)
+```
+
+### Parameter setting for $A\rightarrow B_i$'s
+
+```{r}
+#######################################
+# Set p_1 and p_2 for A and each B
+p_1_BtoA <- p_2_BtoA <- p_B
+OR_BtoA <- 2+rexp(n_signif_B)
+p_1_BtoA[which_signif_BtoA] <- get_p1(p_2_BtoA[which_signif_BtoA],OR_BtoA)
+```
+
+Check $p_1$ and $p_2$ for associated $A\rightarrow B_i$'s:
+
+```{r}
+p_1_BtoA[which_signif_BtoA]
+p_2_BtoA[which_signif_BtoA]
+```
+
+### Simulate contingency table and perform FET for all $A\rightarrow B_i$'s
+
+```{r}
+#######################################
+# Simulate contingency tables, calculate sort ratios and perform FET between A and each B
+pval_BtoA <- sort_ratio_BtoA <- numeric(nrow(meta_B))
+
+for(B_idx in seq_along(pval_BtoA)){
+    temp_table <- simulate_table(N, n_A, N-n_A, p_1_BtoA[B_idx], p_2_BtoA[B_idx])
+    # Add pseudo-count for true associations
+    if(B_idx%in%which_signif_BtoA){
+      pseudo_mat <- min(5,sum(temp_table[,1]),sum(temp_table[1,]))*
+        matrix(c(1,-1,-1,1),2,2)
+      temp_table <- temp_table+pseudo_mat
+    }
+    sort_ratio_BtoA[B_idx] <- temp_table[1,1]/sum(temp_table[,1])
+    pval_BtoA[B_idx] <- fisher.test(temp_table)$p.value
+}
+
+# Calculate prediction score
+score_BtoA <- -log10(pval_BtoA)+log10(sort_ratio_BtoA)
+```
+
+Example table with association:
+
+```{r}
+simulate_table(N, n_A, N-n_A, 
+               p_1_BtoA[which_signif_BtoA[1]], 
+               p_2_BtoA[which_signif_BtoA[1]])+
+  5*matrix(c(1,-1,-1,1),2,2)
+```
+
+Example table without association:
+
+```{r}
+simulate_table(N, n_A, N-n_A, p_1_BtoA[1], p_2_BtoA[1])
+```
+
+Check p-value of associated ones and randomly selected 10:
+
+```{r}
+pval_BtoA[which_signif_BtoA]
+sample(pval_BtoA,10)
+```
+
+Number of p-values less or equal to 1e-5:
+
+```{r}
+sum(pval_BtoA<=1e-5)
+```
+
+### Select top $N=50$ $B$'s with highest prediction score among significant $B$'s
+
+Since we have less than $N$ significant $B$'s, we just use these significant ones instead of 50.
+
+```{r}
+######################################
+# Keep significant Bs with p-value <=1e-5, then
+# choose top 50 B's with largest prediction score
+# or largest p-values
+
+
+#cand_B <- which(rank(pval_BtoA)<=50)
+cand_B <- which(rank(-score_BtoA)<=50)
+
+# Since there are only 20 pval left, just use these 20 instead of 50.
+cand_B <- cand_B[pval_BtoA[cand_B]<=1e-5] 
+```
+
+Indices of candidate $B$'s to keep:
+
+```{r}
+cand_B
+```
+
+For stress test, we can also use top $N=50$ $B$'s with smallest p-values regardless of their significancy.
+
+```{r}
+cand_B_2 <- which(rank(pval_BtoA)<=50)
+```
+
+### Simulate contingency table and perform FET for top $N$ $B$'s and all $C$'s
+
+For significant $B$'s:
+
+```{r}
+res_CtoB <- test_CtoB(cand_B,p_C,which_signif_CtoB, verbose=F)
+```
+
+A matrix of p-values:
+
+```{r}
+str(res_CtoB$PVAL_CtoB)
+
+```
+
+Number of significant $C$'s for $B_1$:
+
+```{r}
+sum(res_CtoB$PVAL_CtoB[,1]<=1e-5)
+```
+
+For top 50 $B$'s:
+
+```{r, echo=F}
+res2_CtoB <- test_CtoB(cand_B_2,p_C,which_signif_CtoB, verbose=F)
+str(res2_CtoB$PVAL_CtoB)
+```
+
+
+### Evaluate power and FDR by comparing predicted association (p-value<=1e-5) with true association
+
+#### Evaluate for predicted significancy between all $A\rightarrow B_i$'s
+
+```{r}
+get_power_FDR(pval_BtoA<=1e-5, seq_len(nrow(meta_B))%in%which_signif_BtoA)
+```
+
+#### Evaluate for predicted significancy between top $N$ $B$'s and all $C$'s
+
+For significant $B$'s:
+
+```{r}
+# True significancy
+true_signif_CtoB <- apply(which_signif_CtoB[,cand_B],
+                          2, function(x) seq_len(nrow(meta_C))%in%x)
+
+get_power_FDR(as.vector(res_CtoB$PVAL_CtoB<=1e-5), as.vector(true_signif_CtoB))
+```
+
+For top 50 $B$'s:
+
+```{r}
+# True significancy
+true_signif_CtoB_2 <- apply(which_signif_CtoB[,cand_B_2],
+                          2, function(x) seq_len(nrow(meta_C))%in%x)
+
+get_power_FDR(as.vector(res2_CtoB$PVAL_CtoB<=1e-5), as.vector(true_signif_CtoB_2))
+```
+
+#### Evaluate for predicted significancy between $A$ and $C$'s
+
+For significant $B$'s:
+
+```{r}
+SKiM_signif_CtoA <- apply(res_CtoB$PVAL_CtoB,1,function(x) any(x<=1e-5))
+
+get_power_FDR(SKiM_signif_CtoA, seq_len(nrow(meta_C))%in%which_signif_CtoA)
+```
+
+For top 50 $B$'s (same result since only significant $B$'s will be used to link between $A$ and $C$'s):
+
+```{r}
+SKiM_signif_CtoA_2 <- apply(res_CtoB$PVAL_CtoB,1,function(x) any(x<=1e-5))
+
+get_power_FDR(SKiM_signif_CtoA_2, seq_len(nrow(meta_C))%in%which_signif_CtoA)
+```
+
+### Why FDR is zero
+
+* The reason of zero FDR is under such biased contigency tables, the p-value distribution of FET under null hypothesis (no association) is discrete and highly skewed towards 1. It's hard to observe small p-values for un-associated pairs. See discussions in [this paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/fdr20for20contingency20tables.pdf). When the p-value cutoff is conservative enough (1e-5 in SKiM), we are not making any false positives.
+
+## More evaulations with random replications
+
+We now test on a wide range of common and rare diseases. Candidate values of $n_A$ are 500, 5,000, 50,000, 100,000, 200,000. For each $n_A$, we repeat 10 times of the simulation and report the average power and FDR. Codes for this part are stored in a separate file. We just show the final results here:
+
+```{r}
+sim_out <- read.csv("sim_out_10012020.csv")
+sim_out
+```
+
+## Session Information
+
+```{r}
+sessionInfo()
+```
